@@ -1,0 +1,131 @@
+import cv2
+import numpy as np
+
+# グローバル変数 (マウスイベント処理で使用)
+drawing = False
+ellipse_center = None
+ellipse_axes = (0, 0)
+ellipse_angle = 0
+mask = None  # 楕円マスクをグローバルに保持
+
+def draw_ellipse(event, x, y, flags, param):
+    """マウスイベント処理関数 (楕円描画とマスク作成)"""
+    global drawing, ellipse_center, ellipse_axes, ellipse_angle, img, original_img, mask
+
+    if event == cv2.EVENT_LBUTTONDOWN:
+        drawing = True
+        ellipse_center = (x, y)
+        ellipse_axes = (0, 0) # 軸をリセット
+        mask = np.zeros(img.shape[:2], dtype=np.uint8) # マスクをリセット
+
+    elif event == cv2.EVENT_MOUSEMOVE:
+        if drawing:
+            # 長軸と短軸を計算 (アスペクト比固定なしで、マウス移動量で決定)
+            dx = x - ellipse_center[0]
+            dy = y - ellipse_center[1]
+            ellipse_axes = (int(abs(dx)), int(abs(dy))) # 長軸、短軸 (半径なので絶対値)
+            img = original_img.copy() # 画像をオリジナルに戻して再描画
+            if ellipse_axes != (0, 0): # 軸がゼロでなければ描画
+                cv2.ellipse(img, ellipse_center, ellipse_axes, ellipse_angle, 0, 360, (0, 255, 0), 2) # 楕円を緑色で描画
+                cv2.imshow("Image", img) # 再表示
+
+    elif event == cv2.EVENT_LBUTTONUP:
+        drawing = False
+        if ellipse_axes != (0, 0): # 軸がゼロでなければマスク作成
+            mask = np.zeros(original_img.shape[:2], dtype=np.uint8) # マスクを初期化 (念のため)
+            cv2.ellipse(mask, ellipse_center, ellipse_axes, ellipse_angle, 0, 360, 255, -1) # 楕円マスクを白色で塗りつぶし
+            print("楕円範囲指定完了")
+        else:
+            mask = None # 楕円が描画されなかった場合はマスクをNoneに
+
+
+def estimate_rock_volume_ellipse(image_path):
+    """
+    画像を表示し、マウスで指定された楕円範囲に基づいて岩石の体積を推定します (回転楕円体近似、ピクセル単位).
+
+    Args:
+        image_path (str): 画像ファイルのパス
+
+    Returns:
+        float: 推定体積 (ピクセル単位の3乗)。楕円範囲が指定されなかった、
+               または岩石領域が検出できなかった場合は 0 を返す。
+               エラーが発生した場合は None を返す。
+    """
+    global img, original_img, mask, ellipse_center, ellipse_axes, ellipse_angle
+    try:
+        # 1. 画像の読み込み
+        original_img = cv2.imread(image_path)
+        if original_img is None:
+            print(f"エラー: 画像ファイル {image_path} が見つかりません。")
+            return None
+        img = original_img.copy() # 表示用画像をコピー
+
+        # 2. ウィンドウとマウスイベント設定
+        cv2.namedWindow("Image")
+        cv2.setMouseCallback("Image", draw_ellipse)
+
+        print("画像ウィンドウ上でマウスをドラッグして楕円範囲を指定してください。")
+        while True:
+            cv2.imshow("Image", img)
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord("q") or key == 27: # 'q'キーまたはEscキーで終了
+                return 0 # ユーザーがキャンセル
+            elif key == ord("e"): # 'e'キーで体積推定実行
+                break
+            elif key == ord("r"): # 'r'キーで楕円選択リセット
+                img = original_img.copy() # 画像をリセット
+                mask = None # マスクをリセット
+                ellipse_center = None
+                ellipse_axes = (0, 0)
+                print("楕円選択をリセットしました。")
+
+
+        if mask is None:
+            print("楕円範囲が指定されませんでした。")
+            return 0
+
+        # 3. 楕円マスク内の岩石領域のピクセル数を計算
+        rock_pixels = cv2.countNonZero(mask) # マスク領域内のピクセル数をカウント
+        print(f"楕円範囲内のピクセル数: {rock_pixels}")
+
+
+        if rock_pixels > 0:
+            # 4. 回転楕円体の軸半径を推定 (ピクセル単位)
+            #    楕円の長軸半径、短軸半径をそのまま回転楕円体の軸半径とする (奥行き方向の半径は短軸半径で近似)
+            a_radius_pixels = max(ellipse_axes) # 長軸半径
+            b_radius_pixels = min(ellipse_axes) # 短軸半径
+            c_radius_pixels = b_radius_pixels # 奥行き方向の半径を短軸半径で近似 (扁平な回転楕円体と仮定)
+
+            print(f"推定長軸半径 (ピクセル): {a_radius_pixels:.2f} ピクセル")
+            print(f"推定短軸半径 (ピクセル): {b_radius_pixels:.2f} ピクセル")
+            print(f"奥行き方向半径 (ピクセル, 短軸近似): {c_radius_pixels:.2f} ピクセル")
+
+
+            # 5. 回転楕円体の体積を計算 (ピクセル単位)
+            estimated_volume_pixels = (4/3) * np.pi * a_radius_pixels * b_radius_pixels * c_radius_pixels
+            print(f"推定体積 (ピクセル単位, 回転楕円体近似): {estimated_volume_pixels:.2f} (ピクセル^3)")
+            return estimated_volume_pixels
+
+        else:
+            print("楕円範囲内に岩石領域が検出できませんでした。") # マスク領域内にピクセルがない場合は岩石なしと判定
+            return 0
+
+    except Exception as e:
+        print(f"エラーが発生しました: {e}")
+        return None
+    finally:
+        cv2.destroyAllWindows() # 最後にウィンドウを閉じる
+
+
+# --- メイン処理 ---
+if __name__ == "__main__":
+    image_path = input("画像パスを入力してください: ")
+    estimated_volume = estimate_rock_volume_ellipse(image_path)
+
+    if estimated_volume is not None:
+        if estimated_volume > 0:
+            print("\n--- 推定結果 ---")
+            print(f"推定体積 (ピクセル単位, 回転楕円体近似): {estimated_volume:.2f} (ピクセル^3)")
+
+        else:
+            print("\n岩石が検出されませんでした (または楕円範囲が指定されませんでした)。")
